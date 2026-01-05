@@ -14,22 +14,20 @@ RABBITS = [
 ]
 
 # ------------------------
-# Paths
+# Paths (data/ 統一)
 # ------------------------
-def here_path(*parts: str) -> str:
-    """この app.py がある場所を起点にパスを作る（Cloudでもローカルでも安定）"""
-    base = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base, *parts)
-
-DATA_DIR = here_path("data")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
 PHOTO_DIR = os.path.join(DATA_DIR, "photos")
 DATA_FILE = os.path.join(DATA_DIR, "rabbit_data.csv")
+
 
 # ------------------------
 # Utility
 # ------------------------
 def to_dt_str(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d %H:%M")
+
 
 def parse_dt_str(s: str):
     if not isinstance(s, str) or not s.strip():
@@ -39,9 +37,11 @@ def parse_dt_str(s: str):
     except Exception:
         return None
 
+
 def ensure_dirs():
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(PHOTO_DIR, exist_ok=True)
+
 
 # ------------------------
 # Data (Rabbit master)
@@ -60,17 +60,16 @@ def init_data():
     )
     df.to_csv(DATA_FILE, index=False, encoding="utf-8-sig")
 
+
 def load_data() -> pd.DataFrame:
     init_data()
-    df = pd.read_csv(DATA_FILE, encoding="utf-8-sig")
-    # 念のため列が欠けていたら補完
-    if "次回予約日時" not in df.columns:
-        df["次回予約日時"] = ""
-    return df
+    return pd.read_csv(DATA_FILE, encoding="utf-8-sig")
+
 
 def save_data(df: pd.DataFrame):
     ensure_dirs()
     df.to_csv(DATA_FILE, index=False, encoding="utf-8-sig")
+
 
 # ------------------------
 # Data (Logs)
@@ -79,6 +78,7 @@ def log_file_path(rabbit_id: str) -> str:
     ensure_dirs()
     return os.path.join(DATA_DIR, f"grooming_{rabbit_id}.csv")
 
+
 def init_log(rabbit_id: str):
     path = log_file_path(rabbit_id)
     if os.path.exists(path):
@@ -86,23 +86,55 @@ def init_log(rabbit_id: str):
     df = pd.DataFrame(columns=["実施日時", "体重(g)", "メモ", "写真ファイル"])
     df.to_csv(path, index=False, encoding="utf-8-sig")
 
+
+def _normalize_log_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    旧形式/揺れを吸収して、最終的に
+    ["実施日時","体重(g)","メモ","写真ファイル"]
+    を必ず持つ形にする。
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["実施日時", "体重(g)", "メモ", "写真ファイル"])
+
+    # ありがちな旧列名 -> 新列名へ
+    rename_map = {
+        "datetime": "実施日時",
+        "date": "実施日時",
+        "日時": "実施日時",
+        "weight_g": "体重(g)",
+        "weight": "体重(g)",
+        "体重": "体重(g)",
+        "memo": "メモ",
+        "photo": "写真ファイル",
+        "photo_filename": "写真ファイル",
+        "写真": "写真ファイル",
+    }
+    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+
+    # 必須列が無ければ追加
+    for c in ["実施日時", "体重(g)", "メモ", "写真ファイル"]:
+        if c not in df.columns:
+            df[c] = ""
+
+    # 型を整える（ここが Streamlit Cloud の .dt エラー回避の本丸）
+    df["実施日時"] = pd.to_datetime(df["実施日時"], errors="coerce")
+    df["体重(g)"] = pd.to_numeric(df["体重(g)"], errors="coerce")
+
+    return df
+
+
 def load_log(rabbit_id: str) -> pd.DataFrame:
     path = log_file_path(rabbit_id)
     if not os.path.exists(path):
         init_log(rabbit_id)
 
     df = pd.read_csv(path, encoding="utf-8-sig")
+    df = _normalize_log_columns(df)
 
-    # 列補完（古いCSV/途中変更でも落ちないように）
-    for col in ["実施日時", "体重(g)", "メモ", "写真ファイル"]:
-        if col not in df.columns:
-            df[col] = ""
-
-    # 型整形（ここが Cloud で落ちてたポイント）
-    df["実施日時"] = pd.to_datetime(df["実施日時"], errors="coerce")
-    df["体重(g)"] = pd.to_numeric(df["体重(g)"], errors="coerce")
-
+    # 実施日時が読めない行は落とす（空行など）
+    df = df.dropna(subset=["実施日時"]).sort_values("実施日時", ascending=False)
     return df
+
 
 def save_uploaded_photo(rabbit_id: str, dt: datetime, uploaded_file) -> str:
     """uploaded_file があれば data/photos に保存してファイル名を返す。なければ空文字。"""
@@ -124,24 +156,34 @@ def save_uploaded_photo(rabbit_id: str, dt: datetime, uploaded_file) -> str:
 
     return filename
 
+
 def append_log(rabbit_id: str, dt: datetime, weight_g: float | None, memo: str, photo_filename: str = ""):
+    # 既存ログを読む（列ゆれ吸収済）
     df = load_log(rabbit_id)
+
     new_row = {
-        "実施日時": to_dt_str(dt),
-        "体重(g)": ("" if weight_g is None else float(weight_g)),
+        "実施日時": dt,  # datetimeで持つ
+        "体重(g)": (None if weight_g is None else float(weight_g)),
         "メモ": memo,
         "写真ファイル": photo_filename,
     }
     df2 = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-    df2.to_csv(log_file_path(rabbit_id), index=False, encoding="utf-8-sig")
+    df2 = _normalize_log_columns(df2).sort_values("実施日時", ascending=False)
+
+    # 保存時は文字列にしてCSVへ（dt accessorで落ちないように必ず to_datetime 済）
+    out = df2.copy()
+    out["実施日時"] = pd.to_datetime(out["実施日時"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+    out.to_csv(log_file_path(rabbit_id), index=False, encoding="utf-8-sig")
+
 
 # ------------------------
 # UI
 # ------------------------
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
-st.caption("✅ VS Code不要 / データは data/ フォルダ内のCSVに保存されます（簡単・壊れにくい）")
+st.caption("✅ VS Code不要 / データはこのフォルダ内のCSVに保存されます（簡単・壊れにくい）")
 
+init_data()
 df = load_data()
 
 # うさぎ選択
@@ -201,13 +243,7 @@ with tab2:
     done_date = st.date_input("実施日", value=done_base.date(), key="done_date")
     done_time = st.time_input("実施時刻", value=done_base.time(), key="done_time")
 
-    weight_g = st.number_input(
-        "体重（g）※未入力なら0のまま",
-        min_value=0.0,
-        max_value=10000.0,
-        value=0.0,
-        step=1.0,
-    )
+    weight_g = st.number_input("体重（g）※未入力なら0のまま", min_value=0.0, max_value=10000.0, value=0.0, step=1.0)
     memo = st.text_area("メモ", placeholder="例）換毛多め、爪切りOK、耳掃除…", height=120)
 
     photo = st.file_uploader("写真（任意）", type=["jpg", "jpeg", "png", "webp"])
@@ -218,9 +254,10 @@ with tab2:
 
         w = None if weight_g == 0.0 else float(weight_g)
 
-        # 写真保存（任意）
+        # 写真を保存
         photo_filename = save_uploaded_photo(sel_id, done_dt, photo)
 
+        # ログ追記
         append_log(sel_id, done_dt, w, memo.strip(), photo_filename)
 
         # 次回予約を消化してクリア
@@ -235,54 +272,46 @@ with tab2:
 # ------------------------
 with tab3:
     st.subheader("体重グラフ・履歴")
-
     init_log(sel_id)
     log_df = load_log(sel_id)
 
     if log_df.empty:
         st.info("まだ履歴がありません。『当日完了登録』で記録してください。")
     else:
-        # --- 履歴（新しい順）
-        view_df = log_df.copy()
-        view_df = view_df.sort_values("実施日時", ascending=False)
-
-        st.markdown("### 履歴（カード表示 / 新しい順）")
-        for _, row in view_df.iterrows():
+        # 履歴（カード表示）
+        st.markdown("### 履歴（新しい順）")
+        for _, row in log_df.iterrows():
             dt = row["実施日時"]
-            dt_str = dt.strftime("%Y-%m-%d %H:%M") if pd.notna(dt) else ""
-            w = row["体重(g)"]
-            w_str = "" if pd.isna(w) else f"{int(w)} g" if float(w).is_integer() else f"{w} g"
-            memo_str = str(row.get("メモ", "") or "")
+            w = row.get("体重(g)", None)
+            memo_txt = str(row.get("メモ", "") or "")
 
             cols = st.columns([2, 1, 4])
             with cols[0]:
-                st.write(f"🕒 {dt_str}")
+                st.write(f"🕒 {dt.strftime('%Y-%m-%d %H:%M') if pd.notna(dt) else ''}")
             with cols[1]:
-                st.write(f"⚖️ {w_str}")
+                st.write(f"⚖️ {'' if pd.isna(w) else int(w)} g")
             with cols[2]:
-                st.write(memo_str)
+                st.write(memo_txt)
 
             photo_name = str(row.get("写真ファイル", "") or "").strip()
             if photo_name:
                 photo_path = os.path.join(PHOTO_DIR, photo_name)
                 if os.path.exists(photo_path):
-                    st.image(photo_path, width=350)
+                    st.image(photo_path, width=360)
                 else:
-                    st.caption("（写真ファイルが見つかりません：Cloudでは再起動等で消える場合があります）")
+                    st.caption("（写真ファイルが見つかりません）")
 
             st.divider()
 
-        # --- 表（確認用）
-        st.markdown("### 履歴データ（表）")
-        with st.expander("履歴データ", expanded=False):
-            # 実施日時を表示用文字列にしてから表示
-            show_df = view_df.copy()
-            show_df["実施日時"] = show_df["実施日時"].dt.strftime("%Y-%m-%d %H:%M")
-            st.dataframe(show_df, width="stretch")
+        # 表（デバッグ用）
+        with st.expander("履歴データ（表）"):
+            view = log_df.copy()
+            view["実施日時"] = view["実施日時"].dt.strftime("%Y-%m-%d %H:%M")
+            st.dataframe(view, width="stretch")
 
-        # --- 体重グラフ（体重があるものだけ）
-        wdf = log_df.copy()
-        wdf = wdf.dropna(subset=["実施日時", "体重(g)"]).sort_values("実施日時")
+        # 体重グラフ（体重があるものだけ）
+        wdf = log_df.dropna(subset=["体重(g)"]).copy()
+        wdf = wdf.sort_values("実施日時", ascending=True)
 
         st.markdown("### 体重推移")
         if wdf.empty:
