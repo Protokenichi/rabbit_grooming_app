@@ -1,0 +1,18 @@
+# venv / python
+venv/
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
+
+# local data (never commit)
+data/
+*.csv
+
+# misc
+*.exe
+.gitignore_app.py
+cd
+git
