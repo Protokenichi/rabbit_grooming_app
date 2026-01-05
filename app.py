@@ -14,9 +14,26 @@ RABBITS = [
     ("R05", "咲希（チビトス）"),
 ]
 
+# ------------------------
+# Utility
+# ------------------------
 def here_path(filename: str) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
 
+def to_dt_str(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%d %H:%M")
+
+def parse_dt_str(s: str):
+    if not isinstance(s, str) or not s.strip():
+        return None
+    try:
+        return datetime.strptime(s.strip(), "%Y-%m-%d %H:%M")
+    except Exception:
+        return None
+
+# ------------------------
+# Data (Rabbit master)
+# ------------------------
 def init_data():
     path = here_path(DATA_FILE)
     if os.path.exists(path):
@@ -37,6 +54,9 @@ def load_data() -> pd.DataFrame:
 def save_data(df: pd.DataFrame):
     df.to_csv(here_path(DATA_FILE), index=False, encoding="utf-8-sig")
 
+# ------------------------
+# Data (Logs)
+# ------------------------
 def log_file_path(rabbit_id: str) -> str:
     return here_path(f"grooming_{rabbit_id}.csv")
 
@@ -51,6 +71,7 @@ def load_log(rabbit_id: str) -> pd.DataFrame:
     path = log_file_path(rabbit_id)
     if not os.path.exists(path):
         init_log(rabbit_id)
+
     df = pd.read_csv(path, encoding="utf-8-sig")
     if not df.empty:
         df["実施日時"] = pd.to_datetime(df["実施日時"], errors="coerce")
@@ -65,18 +86,6 @@ def append_log(rabbit_id: str, dt: datetime, weight_g: float | None, memo: str):
     }
     df2 = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
     df2.to_csv(log_file_path(rabbit_id), index=False, encoding="utf-8-sig")
-
-def to_dt_str(dt: datetime) -> str:
-    return dt.strftime("%Y-%m-%d %H:%M")
-
-def parse_dt_str(s: str):
-    if not isinstance(s, str) or not s.strip():
-        return None
-    try:
-        return datetime.strptime(s.strip(), "%Y-%m-%d %H:%M")
-    except Exception:
-        return None
-
 
 # ------------------------
 # UI
@@ -101,6 +110,9 @@ next_dt = parse_dt_str(next_str)
 # タブ
 tab1, tab2, tab3 = st.tabs(["📅 次回予約（1件）", "🧼 当日完了登録", "📈 体重グラフ・履歴"])
 
+# ------------------------
+# Tab1: Next booking
+# ------------------------
 with tab1:
     st.subheader("次回グルーミング予約（うさぎごとに“次回1件だけ”）")
 
@@ -115,22 +127,27 @@ with tab1:
     d = st.date_input("日付", value=base.date(), key="next_date")
     t = st.time_input("時刻", value=base.time(), key="next_time")
 
-    if st.button("✅ 次回予約を保存"):
-        combined = datetime.combine(d, t)
-        df.loc[row_idx, "次回予約日時"] = to_dt_str(combined)
-        save_data(df)
-        st.success("保存しました")
-        st.rerun()
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("✅ 次回予約を保存"):
+            combined = datetime.combine(d, t)
+            df.loc[row_idx, "次回予約日時"] = to_dt_str(combined)
+            save_data(df)
+            st.success("保存しました")
+            st.rerun()
 
-    if st.button("🗑 次回予約をクリア"):
-        df.loc[row_idx, "次回予約日時"] = ""
-        save_data(df)
-        st.info("クリアしました")
-        st.rerun()
+    with col_b:
+        if st.button("🗑 次回予約をクリア"):
+            df.loc[row_idx, "次回予約日時"] = ""
+            save_data(df)
+            st.info("クリアしました")
+            st.rerun()
 
+# ------------------------
+# Tab2: Done log
+# ------------------------
 with tab2:
     st.subheader("当日のグルーミング完了を登録")
-
     st.caption("完了を記録すると、次回予約は“消化した”扱いで空になります（次回を改めて設定する運用）。")
 
     done_base = datetime.now().replace(second=0, microsecond=0)
@@ -154,6 +171,9 @@ with tab2:
         st.success("記録しました（次回予約はクリアされました）")
         st.rerun()
 
+# ------------------------
+# Tab3: Weight chart & history
+# ------------------------
 with tab3:
     st.subheader("体重グラフ・履歴")
 
@@ -163,25 +183,39 @@ with tab3:
     if log_df.empty:
         st.info("まだ履歴がありません。『当日完了登録』で記録してください。")
     else:
-        # 並び替え
+        # --- 履歴表示（新しい順）
         view_df = log_df.copy()
         view_df["実施日時"] = pd.to_datetime(view_df["実施日時"], errors="coerce")
         view_df = view_df.sort_values("実施日時", ascending=False)
 
         st.markdown("### 履歴（新しい順）")
-        st.dataframe(view_df, use_container_width=True, hide_index=True)
+        with st.expander("履歴データ", expanded=True):
+            st.dataframe(view_df, width="stretch")
 
-        # 体重グラフ（体重があるものだけ）
+        # --- 体重グラフ（体重があるものだけ）
         wdf = log_df.copy()
         wdf["実施日時"] = pd.to_datetime(wdf["実施日時"], errors="coerce")
         wdf["体重(g)"] = pd.to_numeric(wdf["体重(g)"], errors="coerce")
         wdf = wdf.dropna(subset=["実施日時", "体重(g)"]).sort_values("実施日時")
 
         st.markdown("### 体重推移")
+
         if wdf.empty:
             st.info("体重が入力された記録がないため、グラフは表示されません。")
         else:
-            st.line_chart(wdf.set_index("実施日時")["体重(g)"])
+            # 期間フィルタ
+            min_d = wdf["実施日時"].min().date()
+            max_d = wdf["実施日時"].max().date()
 
-st.divider()
-st.caption("📌 次回アップデート：『完了したら次回予約を自動で繰り上げる（2段予約）』/ スマホ外出先アクセス（クラウド）/ 画像表示 など")
+            start_d, end_d = st.date_input(
+                "表示期間",
+                value=(min_d, max_d),
+                key="weight_range",
+            )
+
+            wview = wdf[(wdf["実施日時"].dt.date >= start_d) & (wdf["実施日時"].dt.date <= end_d)]
+            if wview.empty:
+                st.warning("この期間には体重データがありません。期間を広げてください。")
+            else:
+                st.line_chart(wview.set_index("実施日時")["体重(g)"])
+                st.caption("※単位：g（グラム）")
