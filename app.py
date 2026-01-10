@@ -103,7 +103,8 @@ def render_zoomable_image(image_path: str):
     with open(image_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("utf-8")
 
-    html = f"""
+    # ★ f-string を使わず .format で埋め込む（JSの { } と衝突しない）
+    html = """
     <div style="width:100%; overflow:auto; border-radius:12px;">
       <div style="width:100%; overflow:auto; border:1px solid #eee; border-radius:12px; padding:6px;">
         <img
@@ -128,7 +129,7 @@ def render_zoomable_image(image_path: str):
         const img = document.getElementById("zoomImg");
 
         function apply() {{
-          img.style.transform = `scale(${scale})`;
+          img.style.transform = `scale(${{scale}})`;
         }}
 
         function zoom(f) {{
@@ -142,8 +143,10 @@ def render_zoomable_image(image_path: str):
         }}
       </script>
     </div>
-    """
+    """.format(ext=ext, b64=b64)
+
     components.html(html, height=560, scrolling=True)
+
 
 
 # ========================
