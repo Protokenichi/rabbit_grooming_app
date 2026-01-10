@@ -84,6 +84,22 @@ def safe_delete_file(path: str) -> bool:
 
 
 # ========================
+# Photo Zoom (Modal)
+# ========================
+def open_photo_zoom(path: str, label: str = "写真"):
+    """押された写真パスをセッションに保存（tab3の最後でダイアログ表示する）"""
+    st.session_state["zoom_photo_path"] = path
+    st.session_state["zoom_photo_label"] = label
+
+
+@st.dialog("📸 写真を拡大")
+def photo_zoom_dialog(path: str, label: str):
+    st.subheader(label)
+    st.image(path, use_container_width=True)
+    st.caption("スマホはピンチでさらに拡大できます。")
+
+
+# ========================
 # Master (Rabbit)
 # ========================
 def init_master():
@@ -139,7 +155,7 @@ def load_log(rabbit_id: str) -> pd.DataFrame:
         if c not in df.columns:
             df[c] = ""
 
-    # 並び替え用のdt列（表示用の元列は文字のままでもOK）
+    # 並び替え用のdt列
     df["_dt"] = pd.to_datetime(df[COL_DT], errors="coerce")
     df = df.dropna(subset=["_dt"])
     return df
@@ -231,6 +247,12 @@ def delete_one_photo_from_row(rabbit_id: str, row_index: int, filename: str):
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
 st.caption("✅ データは data/ に保存されます（Streamlit Cloud でも動作）")
+
+# 拡大表示状態の初期化（念のため）
+if "zoom_photo_path" not in st.session_state:
+    st.session_state["zoom_photo_path"] = ""
+if "zoom_photo_label" not in st.session_state:
+    st.session_state["zoom_photo_label"] = "写真"
 
 init_master()
 master_df = load_master()
@@ -327,7 +349,7 @@ with tab2:
 
 
 # ------------------------
-# Tab3: History + chart + delete photo
+# Tab3: History + chart + delete photo + zoom
 # ------------------------
 with tab3:
     st.subheader("体重グラフ・履歴（写真の削除もここ）")
@@ -351,19 +373,29 @@ with tab3:
 
         for i, row in view_df.iterrows():
             dt_str = str(row.get(COL_DT, ""))
-            w_str = str(row.get(COL_W, ""))
+            w_val = row.get(COL_W, "")
             memo_str = str(row.get(COL_MEMO, ""))
 
-            st.write(f"🕒 **{dt_str}**　　⚖️ **{w_str} g**")
+            # 体重表示の見た目（nan対策）
+            w_show = ""
+            try:
+                if str(w_val).lower() != "nan" and str(w_val).strip() != "":
+                    w_show = f"{w_val} g"
+            except Exception:
+                w_show = ""
+
+            st.write(f"🕒 **{dt_str}**" + (f"　　⚖️ **{w_show}**" if w_show else ""))
+
             if memo_str and memo_str.lower() != "nan":
                 st.write(memo_str)
 
             photos_list = split_photos(row.get(COL_PHOTOS, ""))
 
             if photos_list:
-                # 1枚ずつ表示 + 削除ボタン
                 for p in photos_list:
                     p_path = photo_path(p)
+
+                    # 写真 / ボタン列
                     cols = st.columns([3, 1])
                     with cols[0]:
                         if os.path.exists(p_path):
@@ -372,6 +404,12 @@ with tab3:
                             st.caption(f"（写真が見つかりません：{p}）")
 
                     with cols[1]:
+                        # 拡大（モーダル）
+                        if os.path.exists(p_path):
+                            if st.button("🔍 拡大", key=f"zoom_{sel_id}_{i}_{p}"):
+                                open_photo_zoom(p_path, label=f"{sel_id} / {dt_str}")
+                                st.rerun()
+
                         if st.button("🗑 この写真を削除", key=f"del_{sel_id}_{i}_{p}"):
                             delete_one_photo_from_row(sel_id, i, p)
                             st.success("削除しました")
@@ -379,7 +417,7 @@ with tab3:
 
             st.divider()
 
-        # 体重グラフ（体重があるものだけ）
+        # --- 体重グラフ（体重があるものだけ）
         wdf = log_df.copy()
         wdf[COL_W] = pd.to_numeric(wdf[COL_W], errors="coerce")
         wdf = wdf.dropna(subset=["_dt", COL_W]).sort_values("_dt")
@@ -403,3 +441,11 @@ with tab3:
             else:
                 st.line_chart(wview.set_index("_dt")[COL_W])
                 st.caption("※単位：g（グラム）")
+
+    # --- ここが「拡大モーダルを開く本体」（tab3の最後に置くのがコツ）
+    if st.session_state.get("zoom_photo_path"):
+        zp = st.session_state["zoom_photo_path"]
+        zl = st.session_state.get("zoom_photo_label", "写真")
+        # 表示後にクリア（連続で開いても安定）
+        st.session_state["zoom_photo_path"] = ""
+        photo_zoom_dialog(zp, zl)
