@@ -1,9 +1,11 @@
 import os
+import base64
 from datetime import datetime
 from uuid import uuid4
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 # ========================
@@ -83,20 +85,65 @@ def safe_delete_file(path: str) -> bool:
         return False
 
 
-# ========================
-# Photo Zoom (Modal)
-# ========================
-def open_photo_zoom(path: str, label: str = "写真"):
-    """押された写真パスをセッションに保存（tab3の最後でダイアログ表示する）"""
-    st.session_state["zoom_photo_path"] = path
-    st.session_state["zoom_photo_label"] = label
+def render_zoomable_image(image_path: str):
+    """
+    iPhoneの「ホーム画面に追加したWebアプリ(PWA)」でも拡大できるように、
+    画像をbase64で埋め込み、HTML内でズーム(＋/－/リセット)できる表示を作る。
+    """
+    if not os.path.exists(image_path):
+        st.error("画像が見つかりません")
+        return
 
+    ext = os.path.splitext(image_path)[1].lower().replace(".", "")
+    if ext == "jpg":
+        ext = "jpeg"
+    if ext not in ["jpeg", "png", "webp"]:
+        ext = "jpeg"
 
-@st.dialog("📸 写真を拡大")
-def photo_zoom_dialog(path: str, label: str):
-    st.subheader(label)
-    st.image(path, use_container_width=True)
-    st.caption("スマホはピンチでさらに拡大できます。")
+    with open(image_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("utf-8")
+
+    html = f"""
+    <div style="width:100%; overflow:auto; border-radius:12px;">
+      <div style="width:100%; overflow:auto; border:1px solid #eee; border-radius:12px; padding:6px;">
+        <img
+          src="data:image/{ext};base64,{b64}"
+          style="
+            width: 100%;
+            height: auto;
+            transform-origin: 0 0;
+          "
+          id="zoomImg"
+        />
+      </div>
+
+      <div style="display:flex; gap:8px; margin-top:10px;">
+        <button onclick="zoom(1.25)" style="padding:8px 12px; font-size:16px;">＋</button>
+        <button onclick="zoom(0.8)" style="padding:8px 12px; font-size:16px;">－</button>
+        <button onclick="resetZoom()" style="padding:8px 12px; font-size:16px;">リセット</button>
+      </div>
+
+      <script>
+        let scale = 1.0;
+        const img = document.getElementById("zoomImg");
+
+        function apply() {{
+          img.style.transform = `scale(${scale})`;
+        }}
+
+        function zoom(f) {{
+          scale = Math.max(1.0, Math.min(6.0, scale * f));
+          apply();
+        }}
+
+        function resetZoom() {{
+          scale = 1.0;
+          apply();
+        }}
+      </script>
+    </div>
+    """
+    components.html(html, height=560, scrolling=True)
 
 
 # ========================
@@ -222,9 +269,7 @@ def append_log_row(
 
 
 def delete_one_photo_from_row(rabbit_id: str, row_index: int, filename: str):
-    """
-    指定の行の写真リストから filename を1つ外す + ファイルも削除
-    """
+    """指定の行の写真リストから filename を1つ外す + ファイルも削除"""
     df = load_log(rabbit_id).reset_index(drop=True)
 
     if row_index < 0 or row_index >= len(df):
@@ -234,10 +279,7 @@ def delete_one_photo_from_row(rabbit_id: str, row_index: int, filename: str):
     photos = [p for p in photos if p != filename]
     df.loc[row_index, COL_PHOTOS] = join_photos(photos)
 
-    # 保存（CSV反映）
     save_log(rabbit_id, df)
-
-    # ファイル削除（存在すれば）
     safe_delete_file(photo_path(filename))
 
 
@@ -248,11 +290,11 @@ st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
 st.caption("✅ データは data/ に保存されます（Streamlit Cloud でも動作）")
 
-# 拡大表示状態の初期化（念のため）
+# session_state 初期化
 if "zoom_photo_path" not in st.session_state:
-    st.session_state["zoom_photo_path"] = ""
+    st.session_state["zoom_photo_path"] = None
 if "zoom_photo_label" not in st.session_state:
-    st.session_state["zoom_photo_label"] = "写真"
+    st.session_state["zoom_photo_label"] = "写真を拡大"
 
 init_master()
 master_df = load_master()
@@ -373,20 +415,11 @@ with tab3:
 
         for i, row in view_df.iterrows():
             dt_str = str(row.get(COL_DT, ""))
-            w_val = row.get(COL_W, "")
+            w_str = str(row.get(COL_W, ""))
             memo_str = str(row.get(COL_MEMO, ""))
 
-            # 体重表示の見た目（nan対策）
-            w_show = ""
-            try:
-                if str(w_val).lower() != "nan" and str(w_val).strip() != "":
-                    w_show = f"{w_val} g"
-            except Exception:
-                w_show = ""
-
-            st.write(f"🕒 **{dt_str}**" + (f"　　⚖️ **{w_show}**" if w_show else ""))
-
-            if memo_str and memo_str.lower() != "nan":
+            st.write(f"🕒 **{dt_str}**　　⚖️ **{w_str} g**")
+            if memo_str and str(memo_str).lower() != "nan":
                 st.write(memo_str)
 
             photos_list = split_photos(row.get(COL_PHOTOS, ""))
@@ -395,8 +428,7 @@ with tab3:
                 for p in photos_list:
                     p_path = photo_path(p)
 
-                    # 写真 / ボタン列
-                    cols = st.columns([3, 1])
+                    cols = st.columns([4, 1, 1])
                     with cols[0]:
                         if os.path.exists(p_path):
                             st.image(p_path, width=420)
@@ -404,20 +436,20 @@ with tab3:
                             st.caption(f"（写真が見つかりません：{p}）")
 
                     with cols[1]:
-                        # 拡大（モーダル）
-                        if os.path.exists(p_path):
-                            if st.button("🔍 拡大", key=f"zoom_{sel_id}_{i}_{p}"):
-                                open_photo_zoom(p_path, label=f"{sel_id} / {dt_str}")
-                                st.rerun()
+                        if st.button("🔍 拡大", key=f"zoom_{sel_id}_{i}_{p}"):
+                            st.session_state["zoom_photo_path"] = p_path
+                            st.session_state["zoom_photo_label"] = f"📸 写真を拡大（{sel_id} / {dt_str}）"
+                            st.rerun()
 
-                        if st.button("🗑 この写真を削除", key=f"del_{sel_id}_{i}_{p}"):
+                    with cols[2]:
+                        if st.button("🗑 削除", key=f"del_{sel_id}_{i}_{p}"):
                             delete_one_photo_from_row(sel_id, i, p)
                             st.success("削除しました")
                             st.rerun()
 
             st.divider()
 
-        # --- 体重グラフ（体重があるものだけ）
+        # ---- 体重グラフ（体重があるものだけ）
         wdf = log_df.copy()
         wdf[COL_W] = pd.to_numeric(wdf[COL_W], errors="coerce")
         wdf = wdf.dropna(subset=["_dt", COL_W]).sort_values("_dt")
@@ -442,10 +474,27 @@ with tab3:
                 st.line_chart(wview.set_index("_dt")[COL_W])
                 st.caption("※単位：g（グラム）")
 
-    # --- ここが「拡大モーダルを開く本体」（tab3の最後に置くのがコツ）
-    if st.session_state.get("zoom_photo_path"):
-        zp = st.session_state["zoom_photo_path"]
-        zl = st.session_state.get("zoom_photo_label", "写真")
-        # 表示後にクリア（連続で開いても安定）
-        st.session_state["zoom_photo_path"] = ""
-        photo_zoom_dialog(zp, zl)
+
+# ========================
+# Zoom Dialog (global)
+# ========================
+if st.session_state.get("zoom_photo_path"):
+    label = st.session_state.get("zoom_photo_label", "写真を拡大")
+
+    try:
+        @st.dialog(label)
+        def _zoom_dialog():
+            render_zoomable_image(st.session_state["zoom_photo_path"])
+            if st.button("閉じる"):
+                st.session_state["zoom_photo_path"] = None
+                st.rerun()
+
+        _zoom_dialog()
+
+    except Exception:
+        # dialog が使えない環境の保険（古いStreamlitなど）
+        st.markdown(f"### 🔎 {label}")
+        render_zoomable_image(st.session_state["zoom_photo_path"])
+        if st.button("閉じる（拡大解除）"):
+            st.session_state["zoom_photo_path"] = None
+            st.rerun()
