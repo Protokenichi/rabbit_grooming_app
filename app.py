@@ -1,11 +1,9 @@
 import os
-import base64
 from datetime import datetime
 from uuid import uuid4
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 
 # ========================
@@ -15,6 +13,9 @@ APP_TITLE = "🐰 うさぎグルーミング管理"
 
 DATA_DIR = "data"
 PHOTO_DIR = os.path.join(DATA_DIR, "photos")
+
+# ★プロフィール画像置き場（GitHubに入れる）
+PROFILE_DIR = os.path.join("assets", "profiles")
 
 MASTER_FILE = os.path.join(DATA_DIR, "rabbit_data.csv")  # うさぎマスタ
 LOG_FILE_TEMPLATE = os.path.join(DATA_DIR, "grooming_{rabbit_id}.csv")  # 履歴ログ
@@ -40,6 +41,8 @@ COL_PHOTOS = "写真ファイル"  # 1行に複数写真を "a.jpg|b.png" のよ
 def ensure_dirs():
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(PHOTO_DIR, exist_ok=True)
+    # PROFILE_DIR はGit管理の想定。無くても動くが、あれば使う。
+    os.makedirs(PROFILE_DIR, exist_ok=True)
 
 
 def to_dt_str(dt: datetime) -> str:
@@ -85,68 +88,61 @@ def safe_delete_file(path: str) -> bool:
         return False
 
 
-def render_zoomable_image(image_path: str):
+# ========================
+# Profile Image
+# ========================
+def profile_path(rabbit_id: str) -> str | None:
     """
-    iPhoneの「ホーム画面に追加したWebアプリ(PWA)」でも拡大できるように、
-    画像をbase64で埋め込み、HTML内でズーム(＋/－/リセット)できる表示を作る。
+    assets/profiles/ に置いたプロフィール画像を探して返す。
+    推奨ファイル名： R01.jpg / R02.png など（RabbitIDと同じ）
     """
-    if not os.path.exists(image_path):
-        st.error("画像が見つかりません")
+    candidates = [
+        os.path.join(PROFILE_DIR, f"{rabbit_id}.jpg"),
+        os.path.join(PROFILE_DIR, f"{rabbit_id}.jpeg"),
+        os.path.join(PROFILE_DIR, f"{rabbit_id}.png"),
+        os.path.join(PROFILE_DIR, f"{rabbit_id}.webp"),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+# ========================
+# Zoom (Dialog)
+# ========================
+def open_zoom(label: str, path: str):
+    st.session_state["zoom_photo_label"] = label
+    st.session_state["zoom_photo_path"] = path
+    st.rerun()
+
+
+def render_zoom_dialog_if_needed():
+    p = st.session_state.get("zoom_photo_path")
+    if not p:
         return
 
-    ext = os.path.splitext(image_path)[1].lower().replace(".", "")
-    if ext == "jpg":
-        ext = "jpeg"
-    if ext not in ["jpeg", "png", "webp"]:
-        ext = "jpeg"
+    label = st.session_state.get("zoom_photo_label", "写真")
 
-    with open(image_path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode("utf-8")
+    # Streamlit v1.25+ の dialog が使える環境はこれが一番安定
+    try:
+        @st.dialog(label)
+        def _zoom_dialog():
+            st.image(p, use_container_width=True)
+            st.caption("※ Safari など一部ブラウザはピンチ拡大できます。")
+            if st.button("閉じる"):
+                st.session_state["zoom_photo_path"] = None
+                st.rerun()
 
-    # ★ f-string を使わず .format で埋め込む（JSの { } と衝突しない）
-    html = """
-    <div style="width:100%; overflow:auto; border-radius:12px;">
-      <div style="width:100%; overflow:auto; border:1px solid #eee; border-radius:12px; padding:6px;">
-        <img
-          src="data:image/{ext};base64,{b64}"
-          style="
-            width: 100%;
-            height: auto;
-            transform-origin: 0 0;
-          "
-          id="zoomImg"
-        />
-      </div>
-
-      <div style="display:flex; gap:8px; margin-top:10px;">
-        <button onclick="zoom(1.25)" style="padding:8px 12px; font-size:16px;">＋</button>
-        <button onclick="zoom(0.8)" style="padding:8px 12px; font-size:16px;">－</button>
-        <button onclick="resetZoom()" style="padding:8px 12px; font-size:16px;">リセット</button>
-      </div>
-
-      <script>
-        let scale = 1.0;
-        const img = document.getElementById("zoomImg");
-
-        function apply() {{
-          img.style.transform = `scale(${{scale}})`;
-        }}
-
-        function zoom(f) {{
-          scale = Math.max(1.0, Math.min(6.0, scale * f));
-          apply();
-        }}
-
-        function resetZoom() {{
-          scale = 1.0;
-          apply();
-        }}
-      </script>
-    </div>
-    """.format(ext=ext, b64=b64)
-
-    components.html(html, height=560, scrolling=True)
-
+        _zoom_dialog()
+    except Exception:
+        # dialog が無い/効かない環境向けフォールバック（画面内に表示）
+        st.markdown(f"## 🔎 {label}")
+        st.image(p, use_container_width=True)
+        st.caption("※ Safari など一部ブラウザはピンチ拡大できます。")
+        if st.button("閉じる（拡大解除）"):
+            st.session_state["zoom_photo_path"] = None
+            st.rerun()
 
 
 # ========================
@@ -272,7 +268,9 @@ def append_log_row(
 
 
 def delete_one_photo_from_row(rabbit_id: str, row_index: int, filename: str):
-    """指定の行の写真リストから filename を1つ外す + ファイルも削除"""
+    """
+    指定の行の写真リストから filename を1つ外す + ファイルも削除
+    """
     df = load_log(rabbit_id).reset_index(drop=True)
 
     if row_index < 0 or row_index >= len(df):
@@ -282,30 +280,41 @@ def delete_one_photo_from_row(rabbit_id: str, row_index: int, filename: str):
     photos = [p for p in photos if p != filename]
     df.loc[row_index, COL_PHOTOS] = join_photos(photos)
 
+    # 保存（CSV反映）
     save_log(rabbit_id, df)
+
+    # ファイル削除（存在すれば）
     safe_delete_file(photo_path(filename))
 
 
 # ========================
 # UI
 # ========================
-st.set_page_config(page_title=APP_TITLE, layout="wide")
+ICON_PATH = os.path.join("assets", "icons", "icon.png")
+
+st.set_page_config(
+    page_title=APP_TITLE,
+    page_icon=ICON_PATH,
+    layout="wide"
+)
 st.title(APP_TITLE)
 st.caption("✅ データは data/ に保存されます（Streamlit Cloud でも動作）")
-
-# session_state 初期化
-if "zoom_photo_path" not in st.session_state:
-    st.session_state["zoom_photo_path"] = None
-if "zoom_photo_label" not in st.session_state:
-    st.session_state["zoom_photo_label"] = "写真を拡大"
 
 init_master()
 master_df = load_master()
 
-# うさぎ選択
+# --- うさぎ選択（ここで sel_id が確定する） ---
 rabbit_labels = [f"{row.RabbitID}：{row.名前}" for row in master_df.itertuples()]
 sel_label = st.sidebar.selectbox("うさぎを選択", rabbit_labels)
 sel_id = sel_label.split("：")[0]
+
+# --- サイドバー：プロフィール画像（sel_id の後に置くのが正解） ---
+st.sidebar.markdown("### 🐰 プロフィール")
+pp = profile_path(sel_id)
+if pp:
+    st.sidebar.image(pp, use_container_width=True)
+else:
+    st.sidebar.info("プロフィール画像が未設定です（assets/profiles に R01.jpg などを置く）")
 
 # 選択行（次回予約）
 row_idx = master_df.index[master_df["RabbitID"] == sel_id][0]
@@ -431,7 +440,8 @@ with tab3:
                 for p in photos_list:
                     p_path = photo_path(p)
 
-                    cols = st.columns([4, 1, 1])
+                    # 画像 + ボタン群
+                    cols = st.columns([3, 1])
                     with cols[0]:
                         if os.path.exists(p_path):
                             st.image(p_path, width=420)
@@ -439,20 +449,18 @@ with tab3:
                             st.caption(f"（写真が見つかりません：{p}）")
 
                     with cols[1]:
-                        if st.button("🔍 拡大", key=f"zoom_{sel_id}_{i}_{p}"):
-                            st.session_state["zoom_photo_path"] = p_path
-                            st.session_state["zoom_photo_label"] = f"📸 写真を拡大（{sel_id} / {dt_str}）"
-                            st.rerun()
+                        if os.path.exists(p_path):
+                            if st.button("🔎 拡大", key=f"zoom_{sel_id}_{i}_{p}"):
+                                open_zoom(f"📸 写真を拡大（{sel_id} / {dt_str}）", p_path)
 
-                    with cols[2]:
-                        if st.button("🗑 削除", key=f"del_{sel_id}_{i}_{p}"):
+                        if st.button("🗑 この写真を削除", key=f"del_{sel_id}_{i}_{p}"):
                             delete_one_photo_from_row(sel_id, i, p)
                             st.success("削除しました")
                             st.rerun()
 
             st.divider()
 
-        # ---- 体重グラフ（体重があるものだけ）
+        # ---- 体重グラフ（体重があるものだけ）----
         wdf = log_df.copy()
         wdf[COL_W] = pd.to_numeric(wdf[COL_W], errors="coerce")
         wdf = wdf.dropna(subset=["_dt", COL_W]).sort_values("_dt")
@@ -477,27 +485,5 @@ with tab3:
                 st.line_chart(wview.set_index("_dt")[COL_W])
                 st.caption("※単位：g（グラム）")
 
-
-# ========================
-# Zoom Dialog (global)
-# ========================
-if st.session_state.get("zoom_photo_path"):
-    label = st.session_state.get("zoom_photo_label", "写真を拡大")
-
-    try:
-        @st.dialog(label)
-        def _zoom_dialog():
-            render_zoomable_image(st.session_state["zoom_photo_path"])
-            if st.button("閉じる"):
-                st.session_state["zoom_photo_path"] = None
-                st.rerun()
-
-        _zoom_dialog()
-
-    except Exception:
-        # dialog が使えない環境の保険（古いStreamlitなど）
-        st.markdown(f"### 🔎 {label}")
-        render_zoomable_image(st.session_state["zoom_photo_path"])
-        if st.button("閉じる（拡大解除）"):
-            st.session_state["zoom_photo_path"] = None
-            st.rerun()
+# ---- 画面の最後で、必要なら拡大ダイアログを出す ----
+render_zoom_dialog_if_needed()
